@@ -34,6 +34,7 @@ export interface _SERVICE {
   'getToolUsageHistory' : ActorMethod<[string, string], Array<UsageEntry>>,
   'getAvailableTools' : ActorMethod<[], Array<Tool>>,
   'adminSetCredits' : ActorMethod<[string, bigint], undefined>,
+  'adminAddCredits' : ActorMethod<[string, bigint], undefined>,
   'getLastDailyCreditTime' : ActorMethod<[], bigint>,
   'submitFeedback' : ActorMethod<[string, string, bigint, string], undefined>,
   'getFeedbacks' : ActorMethod<[string, string], Array<FeedbackEntry>>,

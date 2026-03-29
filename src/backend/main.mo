@@ -158,6 +158,20 @@ actor {
     };
   };
 
+  public func adminAddCredits(email : Text, amount : Nat) : async () {
+    switch (emailUsers.get(email)) {
+      case (null) { Runtime.trap("User not found") };
+      case (?record) {
+        emailUsers.add(email, {
+          username     = record.username;
+          email        = record.email;
+          passwordHash = record.passwordHash;
+          credits      = record.credits + amount;
+        });
+      };
+    };
+  };
+
   public func useTool(toolName : Text, email : Text, passwordHash : Text) : async () {
     let record = authenticate(email, passwordHash);
     let tool = switch (tools.get(toolName)) {

@@ -7,6 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   AlertTriangle,
@@ -101,7 +102,6 @@ function DailyCreditsCountdown() {
 
     let interval: ReturnType<typeof setInterval>;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     actor
       .getLastDailyCreditTime()
       .then((raw: bigint) => {
@@ -181,10 +181,30 @@ function DailyCreditsCountdown() {
 
 export function Dashboard() {
   const { user } = useAuth();
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
   const { data: credits, isLoading: creditsLoading } = useGetCredits();
   const { data: history, isLoading: historyLoading } = useGetUsageHistory();
   const displayCredits = credits ?? 0;
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+
+  // One-time bonus: grant +5 credits on first visit (per device)
+  useEffect(() => {
+    if (!actor || isFetching || !user?.email) return;
+    if (credits === undefined) return; // wait for credits to load
+    if (localStorage.getItem("v24_bonus_granted")) return;
+
+    const newTotal = BigInt(credits) + 5n;
+    actor
+      .adminSetCredits(user.email, newTotal)
+      .then(() => {
+        localStorage.setItem("v24_bonus_granted", "1");
+        queryClient.invalidateQueries({ queryKey: ["credits"] });
+      })
+      .catch(() => {
+        // silently ignore — will retry next visit
+      });
+  }, [actor, isFetching, user?.email, credits, queryClient]);
 
   return (
     <div className="min-h-screen pt-20">
