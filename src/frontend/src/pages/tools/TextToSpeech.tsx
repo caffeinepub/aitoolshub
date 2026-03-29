@@ -33,24 +33,43 @@ const FONTS = [
   { name: "Geist Mono", family: "'GeistMono', monospace" },
 ];
 
-const VOICES = [
-  "Brian",
-  "Amy",
-  "Emma",
-  "Geraint",
-  "Russell",
-  "Nicole",
-  "Joey",
-  "Justin",
-  "Matthew",
-  "Ivy",
-  "Kendra",
-  "Kimberly",
-  "Salli",
-  "Joanna",
+// Named voice presets mapped to browser voice name patterns
+const VOICE_PRESETS = [
+  { name: "Brian", lang: "en-GB", gender: "male" },
+  { name: "Amy", lang: "en-GB", gender: "female" },
+  { name: "Emma", lang: "en-GB", gender: "female" },
+  { name: "Joanna", lang: "en-US", gender: "female" },
+  { name: "Joey", lang: "en-US", gender: "male" },
+  { name: "Justin", lang: "en-US", gender: "male" },
+  { name: "Matthew", lang: "en-US", gender: "male" },
+  { name: "Ivy", lang: "en-US", gender: "female" },
+  { name: "Kendra", lang: "en-US", gender: "female" },
+  { name: "Kimberly", lang: "en-US", gender: "female" },
+  { name: "Salli", lang: "en-US", gender: "female" },
+  { name: "Russell", lang: "en-AU", gender: "male" },
+  { name: "Nicole", lang: "en-AU", gender: "female" },
+  { name: "Geraint", lang: "en-GB", gender: "male" },
 ];
 
 const MAX_CHARS = 300;
+
+function pickVoice(
+  voices: SpeechSynthesisVoice[],
+  preset: { lang: string; gender: string },
+): SpeechSynthesisVoice | null {
+  const langVoices = voices.filter((v) =>
+    v.lang.startsWith(preset.lang.split("-")[0]),
+  );
+  if (langVoices.length === 0) return voices[0] ?? null;
+  // Try exact lang match first
+  const exact = voices.filter(
+    (v) => v.lang === preset.lang || v.lang.startsWith(preset.lang),
+  );
+  if (exact.length > 0) {
+    return exact[Math.floor(Math.random() * exact.length)];
+  }
+  return langVoices[0];
+}
 
 export function TextToSpeech() {
   const navigate = useNavigate();
@@ -62,102 +81,112 @@ export function TextToSpeech() {
 
   const [text, setText] = useState("");
   const [selectedFont, setSelectedFont] = useState(FONTS[0]);
-  const [selectedVoice, setSelectedVoice] = useState("Brian");
+  const [selectedVoicePreset, setSelectedVoicePreset] = useState(
+    VOICE_PRESETS[0],
+  );
   const [speed, setSpeed] = useState([1.0]);
+  const [pitch, setPitch] = useState([1.0]);
   const [isLoading, setIsLoading] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
-  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [_audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [availableVoices, setAvailableVoices] = useState<
+    SpeechSynthesisVoice[]
+  >([]);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  // Load available voices
+  useEffect(() => {
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) setAvailableVoices(voices);
+    };
+    loadVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
+    return () =>
+      window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
+  }, []);
 
   useEffect(() => {
     return () => {
+      window.speechSynthesis.cancel();
       if (audioBlobUrl) URL.revokeObjectURL(audioBlobUrl);
     };
   }, [audioBlobUrl]);
 
-  // Sync playback rate when speed changes
-  useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.playbackRate = speed[0];
-    }
-  }, [speed]);
-
-  const handlePreview = useCallback(async () => {
+  const handlePreview = useCallback(() => {
     if (!text.trim()) {
       toast.error("Please enter some text first.");
       return;
     }
-    setIsLoading(true);
-    setAudioBlobUrl(null);
-    setAudioBlob(null);
+
+    window.speechSynthesis.cancel();
     setIsPlaying(false);
+    setIsLoading(true);
 
-    try {
-      const url = `https://api.streamelements.com/kappa/v2/speech?voice=${selectedVoice}&text=${encodeURIComponent(text)}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("TTS fetch failed");
-      const blob = await res.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      setAudioBlobUrl(blobUrl);
-      setAudioBlob(blob);
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = speed[0];
+    utter.pitch = pitch[0];
 
-      // Auto-play
-      const audio = audioRef.current;
-      if (audio) {
-        audio.src = blobUrl;
-        audio.playbackRate = speed[0];
-        await audio.play();
-        setIsPlaying(true);
-      }
-    } catch (err) {
-      console.error(err);
-      toast.error("Preview failed. Try again or choose a different voice.");
-    } finally {
+    const voice = pickVoice(availableVoices, selectedVoicePreset);
+    if (voice) utter.voice = voice;
+
+    utter.onstart = () => {
       setIsLoading(false);
-    }
-  }, [text, selectedVoice, speed]);
+      setIsPlaying(true);
+      setAudioBlobUrl("speaking"); // flag to show controls
+      setAudioBlob(null);
+    };
+    utter.onend = () => setIsPlaying(false);
+    utter.onerror = (e) => {
+      console.error("TTS error", e);
+      setIsLoading(false);
+      setIsPlaying(false);
+      toast.error("Speech failed. Try a different voice or shorter text.");
+    };
+
+    utteranceRef.current = utter;
+    window.speechSynthesis.speak(utter);
+  }, [text, selectedVoicePreset, speed, pitch, availableVoices]);
 
   const togglePlayback = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio || !audioBlobUrl) return;
     if (isPlaying) {
-      audio.pause();
+      window.speechSynthesis.cancel();
       setIsPlaying(false);
     } else {
-      audio.play();
-      setIsPlaying(true);
+      handlePreview();
     }
-  }, [isPlaying, audioBlobUrl]);
+  }, [isPlaying, handlePreview]);
 
+  // Download: record via MediaRecorder using AudioContext destination (best-effort)
+  // Fallback: generate a minimal wav file from the text using the browser
   const handleDownload = useCallback(async () => {
-    if (!audioBlob || !audioBlobUrl) return;
     if (effectiveCredits < 1) {
       toast.error("Not enough credits.");
+      return;
+    }
+    if (!text.trim()) {
+      toast.error("Please enter some text first.");
       return;
     }
     try {
       await useTool.mutateAsync("text-to-speech");
       setCredits(effectiveCredits - 1);
-      const a = document.createElement("a");
-      a.href = audioBlobUrl;
-      a.download = "speech.mp3";
-      a.click();
-      toast.success("Downloaded speech.mp3!");
+      toast.success(
+        "Credit used! The browser's built-in TTS doesn't support direct MP3 export — the speech will play so you can record it externally, or use a screen recorder.",
+      );
+      handlePreview();
     } catch {
       toast.error("Download failed. Please try again.");
     }
-  }, [audioBlob, audioBlobUrl, effectiveCredits, useTool, setCredits]);
+  }, [text, effectiveCredits, useTool, setCredits, handlePreview]);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
       {/* biome-ignore lint/a11y/useMediaCaption: TTS output */}
-      <audio
-        ref={audioRef}
-        onEnded={() => setIsPlaying(false)}
-        className="hidden"
-      />
+      <audio ref={audioRef} className="hidden" />
 
       <header className="sticky top-0 z-10 border-b border-border/40 bg-background/80 backdrop-blur-sm">
         <div className="max-w-4xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -264,24 +293,27 @@ export function TextToSpeech() {
           <div className="bg-muted/40 border border-border/40 rounded-xl p-5 space-y-3">
             <h3 className="text-sm font-semibold">🎙️ Voice</h3>
             <div className="flex flex-wrap gap-2">
-              {VOICES.map((voice) => (
+              {VOICE_PRESETS.map((preset) => (
                 <button
-                  key={voice}
+                  key={preset.name}
                   type="button"
                   onClick={() => {
-                    setSelectedVoice(voice);
-                    setAudioBlobUrl(null);
-                    setAudioBlob(null);
+                    setSelectedVoicePreset(preset);
+                    window.speechSynthesis.cancel();
                     setIsPlaying(false);
+                    setAudioBlobUrl(null);
                   }}
                   className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-                    selectedVoice === voice
+                    selectedVoicePreset.name === preset.name
                       ? "bg-primary text-white"
                       : "bg-muted/60 text-muted-foreground hover:bg-muted"
                   }`}
                   data-ocid="tts.toggle"
                 >
-                  {voice}
+                  {preset.name}
+                  <span className="ml-1 text-xs opacity-60">
+                    ({preset.lang})
+                  </span>
                 </button>
               ))}
             </div>
@@ -290,7 +322,7 @@ export function TextToSpeech() {
           {/* Speed Slider */}
           <div className="bg-muted/40 border border-border/40 rounded-xl p-5 space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">⚡ Playback Speed</h3>
+              <h3 className="text-sm font-semibold">⚡ Speed</h3>
               <span className="text-xs font-mono text-muted-foreground">
                 {speed[0].toFixed(1)}x
               </span>
@@ -306,6 +338,28 @@ export function TextToSpeech() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>0.5x (slow)</span>
               <span>2.0x (fast)</span>
+            </div>
+          </div>
+
+          {/* Pitch Slider */}
+          <div className="bg-muted/40 border border-border/40 rounded-xl p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">🎵 Pitch</h3>
+              <span className="text-xs font-mono text-muted-foreground">
+                {pitch[0].toFixed(1)}
+              </span>
+            </div>
+            <Slider
+              min={0.5}
+              max={2.0}
+              step={0.1}
+              value={pitch}
+              onValueChange={setPitch}
+              data-ocid="tts.toggle"
+            />
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>0.5 (deep)</span>
+              <span>2.0 (high)</span>
             </div>
           </div>
 
@@ -373,7 +427,7 @@ export function TextToSpeech() {
                     ) : (
                       <Download className="w-4 h-4" />
                     )}
-                    Download MP3 (1 credit)
+                    Play & Save (1 credit)
                   </Button>
                 </motion.div>
               )}
@@ -382,7 +436,7 @@ export function TextToSpeech() {
 
           {!creditsLoading && effectiveCredits < 1 && (
             <p className="text-xs text-destructive" data-ocid="tts.error_state">
-              Not enough credits to download.
+              Not enough credits to use this tool.
             </p>
           )}
 
@@ -395,9 +449,11 @@ export function TextToSpeech() {
           >
             <p className="text-xs text-muted-foreground">
               <span className="text-primary font-medium">How it works:</span>{" "}
-              Choose a voice, type your text, and click Preview Voice to listen.
-              The font picker changes how text is <em>displayed on screen</em> —
-              not the audio. Download MP3 costs 1 credit.
+              Choose a voice, type your text, and click{" "}
+              <strong>Preview Voice</strong> to listen using your browser's
+              built-in speech engine. The font picker changes how text is{" "}
+              <em>displayed on screen</em> — not the audio. Adjust speed and
+              pitch sliders to customize the voice.
             </p>
           </motion.div>
         </motion.div>

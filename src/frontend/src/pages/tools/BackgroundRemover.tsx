@@ -11,6 +11,7 @@ import {
   RotateCcw,
   Scissors,
   Upload,
+  Wand2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,7 +19,68 @@ import { toast } from "sonner";
 import { useAuth } from "../../context/AuthContext";
 import { useGetCredits, useUseTool } from "../../hooks/useQueries";
 
-type Tool = "brush" | "eraser";
+type Tool = "brush" | "eraser" | "wand";
+
+type ColorPreset = "green" | "black" | "white" | "custom";
+
+const COLOR_PRESETS: {
+  id: ColorPreset;
+  label: string;
+  color: [number, number, number];
+  bg: string;
+  border: string;
+}[] = [
+  {
+    id: "green",
+    label: "Green Screen",
+    color: [0, 177, 64],
+    bg: "bg-green-600/20",
+    border: "border-green-500/50",
+  },
+  {
+    id: "black",
+    label: "Black Screen",
+    color: [0, 0, 0],
+    bg: "bg-gray-900/60",
+    border: "border-gray-600/50",
+  },
+  {
+    id: "white",
+    label: "White BG",
+    color: [255, 255, 255],
+    bg: "bg-white/10",
+    border: "border-white/30",
+  },
+  {
+    id: "custom",
+    label: "Custom Color",
+    color: [255, 0, 128],
+    bg: "bg-pink-600/20",
+    border: "border-pink-500/50",
+  },
+];
+
+function colorDistance(
+  r1: number,
+  g1: number,
+  b1: number,
+  r2: number,
+  g2: number,
+  b2: number,
+): number {
+  return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
+}
+
+function hexToRgb(hex: string): [number, number, number] {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result
+    ? [
+        Number.parseInt(result[1], 16),
+        Number.parseInt(result[2], 16),
+        Number.parseInt(result[3], 16),
+      ]
+    : [255, 0, 128];
+}
 
 export function BackgroundRemover() {
   const navigate = useNavigate();
@@ -30,11 +92,17 @@ export function BackgroundRemover() {
   const [fileName, setFileName] = useState("");
   const [activeTool, setActiveTool] = useState<Tool>("brush");
   const [brushSize, setBrushSize] = useState(25);
+  const [wandTolerance, setWandTolerance] = useState(40);
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasResult, setHasResult] = useState(false);
   const [resultDataUrl, setResultDataUrl] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
   const [hasMask, setHasMask] = useState(false);
+
+  // Color remove state
+  const [colorTolerance, setColorTolerance] = useState(60);
+  const [customColor, setCustomColor] = useState("#ff0080");
+  const [applyingColor, setApplyingColor] = useState(false);
 
   const canvasWidth = 600;
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -65,7 +133,6 @@ export function BackgroundRemover() {
     img.src = url;
   }, []);
 
-  // Draw image to canvas when loaded
   useEffect(() => {
     if (!image || !imageCanvasRef.current || !maskCanvasRef.current) return;
     const aspect = image.height / image.width;
@@ -77,7 +144,6 @@ export function BackgroundRemover() {
     maskCanvasRef.current.height = h;
     const ctx = imageCanvasRef.current.getContext("2d")!;
     ctx.drawImage(image, 0, 0, w, h);
-    // Clear mask
     const mCtx = maskCanvasRef.current.getContext("2d")!;
     mCtx.clearRect(0, 0, w, h);
   }, [image]);
@@ -104,6 +170,69 @@ export function BackgroundRemover() {
       x: (clientX - rect.left) * scaleX,
       y: (clientY - rect.top) * scaleY,
     };
+  };
+
+  // Magic Wand flood fill
+  const doFloodFill = (startX: number, startY: number) => {
+    if (!imageCanvasRef.current || !maskCanvasRef.current) return;
+    const iCtx = imageCanvasRef.current.getContext("2d")!;
+    const w = imageCanvasRef.current.width;
+    const h = imageCanvasRef.current.height;
+    const imageData = iCtx.getImageData(0, 0, w, h);
+    const mCtx = maskCanvasRef.current.getContext("2d")!;
+    const maskImageData = mCtx.getImageData(0, 0, w, h);
+
+    const sx = Math.round(startX);
+    const sy = Math.round(startY);
+    if (sx < 0 || sx >= w || sy < 0 || sy >= h) return;
+
+    const idx = (sy * w + sx) * 4;
+    const targetR = imageData.data[idx];
+    const targetG = imageData.data[idx + 1];
+    const targetB = imageData.data[idx + 2];
+
+    const visited = new Uint8Array(w * h);
+    const stack: number[] = [sy * w + sx];
+    visited[sy * w + sx] = 1;
+
+    const maxDist = (wandTolerance / 100) * 441.67; // 441.67 = sqrt(3 * 255^2)
+
+    while (stack.length > 0) {
+      const pos = stack.pop()!;
+      const px = pos % w;
+      const py = Math.floor(pos / w);
+      const pi = pos * 4;
+
+      const r = imageData.data[pi];
+      const g = imageData.data[pi + 1];
+      const b = imageData.data[pi + 2];
+
+      if (colorDistance(r, g, b, targetR, targetG, targetB) <= maxDist) {
+        maskImageData.data[pi] = 239;
+        maskImageData.data[pi + 1] = 68;
+        maskImageData.data[pi + 2] = 68;
+        maskImageData.data[pi + 3] = 153;
+
+        const neighbors = [
+          { x: px - 1, y: py },
+          { x: px + 1, y: py },
+          { x: px, y: py - 1 },
+          { x: px, y: py + 1 },
+        ];
+        for (const n of neighbors) {
+          if (n.x >= 0 && n.x < w && n.y >= 0 && n.y < h) {
+            const npos = n.y * w + n.x;
+            if (!visited[npos]) {
+              visited[npos] = 1;
+              stack.push(npos);
+            }
+          }
+        }
+      }
+    }
+
+    mCtx.putImageData(maskImageData, 0, 0);
+    setHasMask(true);
   };
 
   const paint = (x: number, y: number) => {
@@ -138,6 +267,11 @@ export function BackgroundRemover() {
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (activeTool === "wand") {
+      const pos = getPos(e);
+      doFloodFill(pos.x, pos.y);
+      return;
+    }
     setIsDrawing(true);
     lastPos.current = null;
     const pos = getPos(e);
@@ -145,7 +279,7 @@ export function BackgroundRemover() {
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
+    if (!isDrawing || activeTool === "wand") return;
     const pos = getPos(e);
     paint(pos.x, pos.y);
   };
@@ -157,6 +291,11 @@ export function BackgroundRemover() {
 
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    if (activeTool === "wand") {
+      const pos = getPos(e);
+      doFloodFill(pos.x, pos.y);
+      return;
+    }
     setIsDrawing(true);
     lastPos.current = null;
     const pos = getPos(e);
@@ -165,9 +304,60 @@ export function BackgroundRemover() {
 
   const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    if (!isDrawing) return;
+    if (!isDrawing || activeTool === "wand") return;
     const pos = getPos(e);
     paint(pos.x, pos.y);
+  };
+
+  // Color range removal
+  const applyColorRange = (preset: ColorPreset) => {
+    if (!imageCanvasRef.current || !maskCanvasRef.current) return;
+    setApplyingColor(true);
+
+    setTimeout(() => {
+      try {
+        const iCtx = imageCanvasRef.current!.getContext("2d")!;
+        const w = imageCanvasRef.current!.width;
+        const h = imageCanvasRef.current!.height;
+        const imageData = iCtx.getImageData(0, 0, w, h);
+        const mCtx = maskCanvasRef.current!.getContext("2d")!;
+        const maskData = mCtx.getImageData(0, 0, w, h);
+
+        let targetColor: [number, number, number];
+        if (preset === "custom") {
+          targetColor = hexToRgb(customColor);
+        } else {
+          const found = COLOR_PRESETS.find((p) => p.id === preset)!;
+          targetColor = found.color;
+        }
+
+        const maxDist = (colorTolerance / 100) * 441.67;
+        const [tr, tg, tb] = targetColor;
+
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          const r = imageData.data[i];
+          const g = imageData.data[i + 1];
+          const b = imageData.data[i + 2];
+          if (colorDistance(r, g, b, tr, tg, tb) <= maxDist) {
+            maskData.data[i] = 239;
+            maskData.data[i + 1] = 68;
+            maskData.data[i + 2] = 68;
+            maskData.data[i + 3] = 153;
+          }
+        }
+
+        mCtx.putImageData(maskData, 0, 0);
+        setHasMask(true);
+        toast.success(
+          `${preset === "custom" ? "Custom color" : COLOR_PRESETS.find((p) => p.id === preset)?.label} selection applied!`,
+          {
+            description: 'Click "Remove Selected Area" to finalize.',
+          },
+        );
+      } finally {
+        setApplyingColor(false);
+      }
+    }, 0);
   };
 
   const handleRemove = async () => {
@@ -185,19 +375,17 @@ export function BackgroundRemover() {
       await useTool.mutateAsync("background-remover");
       const w = imageCanvasRef.current.width;
       const h = imageCanvasRef.current.height;
-      // Create offscreen result canvas
       const offscreen = document.createElement("canvas");
       offscreen.width = w;
       offscreen.height = h;
       const ctx = offscreen.getContext("2d")!;
       ctx.drawImage(imageCanvasRef.current, 0, 0);
-      // Get mask data
       const maskCtx = maskCanvasRef.current.getContext("2d")!;
       const maskData = maskCtx.getImageData(0, 0, w, h);
       const imgData = ctx.getImageData(0, 0, w, h);
       for (let i = 0; i < maskData.data.length; i += 4) {
         if (maskData.data[i + 3] > 10) {
-          imgData.data[i + 3] = 0; // make transparent
+          imgData.data[i + 3] = 0;
         }
       }
       ctx.putImageData(imgData, 0, 0);
@@ -243,6 +431,12 @@ export function BackgroundRemover() {
     if (f) loadImage(f);
   };
 
+  const getCursor = () => {
+    if (activeTool === "wand") return "cell";
+    if (activeTool === "eraser") return "cell";
+    return "crosshair";
+  };
+
   return (
     <div className="min-h-screen pt-20">
       <div className="max-w-3xl mx-auto px-4 py-12">
@@ -279,8 +473,8 @@ export function BackgroundRemover() {
             <div>
               <h1 className="text-2xl font-bold">Background Remover</h1>
               <p className="text-muted-foreground text-sm mt-0.5">
-                Paint over the area you want to remove, then click Remove
-                Selected Area.
+                Paint, click with Magic Wand, or use Color Remove to select
+                areas.
               </p>
             </div>
           </div>
@@ -319,9 +513,10 @@ export function BackgroundRemover() {
             </div>
           ) : (
             <div>
-              {/* Toolbar */}
-              <div className="flex flex-wrap items-center gap-3 mb-4 p-3 rounded-xl bg-muted/40 border border-border/40">
-                <div className="flex items-center gap-2">
+              {/* ── Toolbar ── */}
+              <div className="flex flex-wrap items-center gap-3 mb-3 p-3 rounded-xl bg-muted/40 border border-border/40">
+                {/* Tool buttons */}
+                <div className="flex items-center gap-1.5">
                   <Button
                     size="sm"
                     variant={activeTool === "brush" ? "default" : "outline"}
@@ -348,21 +543,54 @@ export function BackgroundRemover() {
                   >
                     <Eraser className="w-4 h-4 mr-1.5" /> Eraser
                   </Button>
+                  <Button
+                    size="sm"
+                    variant={activeTool === "wand" ? "default" : "outline"}
+                    className={
+                      activeTool === "wand"
+                        ? "gradient-btn border-0 text-white"
+                        : ""
+                    }
+                    onClick={() => setActiveTool("wand")}
+                    data-ocid="tool.toggle"
+                  >
+                    <Wand2 className="w-4 h-4 mr-1.5" /> Wand
+                  </Button>
                 </div>
 
+                {/* Dynamic slider */}
                 <div className="flex items-center gap-3 flex-1 min-w-[140px]">
-                  <span className="text-xs text-muted-foreground whitespace-nowrap">
-                    Size: {brushSize}px
-                  </span>
-                  <Slider
-                    min={5}
-                    max={80}
-                    step={5}
-                    value={[brushSize]}
-                    onValueChange={(v) => setBrushSize(v[0])}
-                    className="flex-1"
-                    data-ocid="tool.toggle"
-                  />
+                  {activeTool === "wand" ? (
+                    <>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">
+                        Tolerance: {wandTolerance}
+                      </span>
+                      <Slider
+                        min={1}
+                        max={100}
+                        step={1}
+                        value={[wandTolerance]}
+                        onValueChange={(v) => setWandTolerance(v[0])}
+                        className="flex-1"
+                        data-ocid="tool.toggle"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">
+                        Size: {brushSize}px
+                      </span>
+                      <Slider
+                        min={5}
+                        max={80}
+                        step={5}
+                        value={[brushSize]}
+                        onValueChange={(v) => setBrushSize(v[0])}
+                        className="flex-1"
+                        data-ocid="tool.toggle"
+                      />
+                    </>
+                  )}
                 </div>
 
                 <Button
@@ -376,6 +604,76 @@ export function BackgroundRemover() {
                 </Button>
               </div>
 
+              {/* ── Color Remove Section ── */}
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-3 p-3 rounded-xl bg-muted/30 border border-border/40"
+              >
+                <p className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">
+                  Color Remove
+                </p>
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {COLOR_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      disabled={applyingColor}
+                      onClick={() => applyColorRange(preset.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all hover:opacity-90 disabled:opacity-50 ${preset.bg} ${preset.border} text-foreground`}
+                      data-ocid="tool.toggle"
+                    >
+                      {applyingColor ? (
+                        <Loader2 className="w-3 h-3 animate-spin inline mr-1" />
+                      ) : null}
+                      {preset.label}
+                    </button>
+                  ))}
+
+                  {/* Custom color picker */}
+                  <label
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border/50 bg-muted/40 cursor-pointer hover:bg-muted/60 transition-all"
+                    data-ocid="tool.toggle"
+                  >
+                    <span
+                      className="w-4 h-4 rounded-sm border border-white/20 inline-block"
+                      style={{ background: customColor }}
+                    />
+                    <span>Custom</span>
+                    <input
+                      type="color"
+                      value={customColor}
+                      onChange={(e) => setCustomColor(e.target.value)}
+                      className="sr-only"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    disabled={applyingColor}
+                    onClick={() => applyColorRange("custom")}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-pink-500/50 bg-pink-600/20 text-foreground hover:opacity-90 disabled:opacity-50 transition-all"
+                    data-ocid="tool.secondary_button"
+                  >
+                    Apply Custom
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    Color Tolerance: {colorTolerance}
+                  </span>
+                  <Slider
+                    min={1}
+                    max={100}
+                    step={1}
+                    value={[colorTolerance]}
+                    onValueChange={(v) => setColorTolerance(v[0])}
+                    className="flex-1 max-w-xs"
+                    data-ocid="tool.toggle"
+                  />
+                </div>
+              </motion.div>
+
               {/* Canvas area */}
               {!hasResult ? (
                 <div className="relative rounded-xl overflow-hidden border border-border/50 bg-[repeating-conic-gradient(#2a2a3e_0%_25%,#1a1a2e_0%_50%)] bg-[length:20px_20px]">
@@ -383,10 +681,7 @@ export function BackgroundRemover() {
                   <canvas
                     ref={maskCanvasRef}
                     className="absolute inset-0 w-full h-full"
-                    style={{
-                      cursor: activeTool === "brush" ? "crosshair" : "cell",
-                      touchAction: "none",
-                    }}
+                    style={{ cursor: getCursor(), touchAction: "none" }}
                     onMouseDown={handleMouseDown}
                     onMouseMove={handleMouseMove}
                     onMouseUp={handleMouseUp}
@@ -412,7 +707,9 @@ export function BackgroundRemover() {
               <p className="text-xs text-muted-foreground mt-2 text-center">
                 {hasResult
                   ? "✅ Area removed. Download below or reset to try again."
-                  : 'Paint over the area to remove, then click "Remove Selected Area"'}
+                  : activeTool === "wand"
+                    ? "🪄 Click on a color area to select similar pixels"
+                    : 'Paint over the area to remove, then click "Remove Selected Area"'}
               </p>
             </div>
           )}
